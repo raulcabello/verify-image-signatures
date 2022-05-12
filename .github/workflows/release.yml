@@ -86,7 +86,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ inputs.annotated-wasm }}
+          asset_path: annotated-policy.wasm
           asset_name: policy.wasm
           asset_content_type: application/wasm
       - name: Notify policy-hub
