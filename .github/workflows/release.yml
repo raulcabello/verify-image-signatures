@@ -34,13 +34,6 @@ jobs:
       - name: Run e2e tests
         run: |
           make e2e-tests
-      - name: Release
-        uses: kubewarden/github-actions/policy-release@v1
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          oci-target: ${{ inputs.oci-target }}
-          workflow-pat: ${{ secrets.workflow-pat }}
-          annotated-wasm: annotated-policy.wasm
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v2
         with:
