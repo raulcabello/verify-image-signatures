@@ -24,6 +24,7 @@ jobs:
       # Required by cosign keyless signing
       id-token: write
     runs-on: ubuntu-latest
+
     steps:
       - name: Install dependencies
         uses: kubewarden/github-actions/policy-gh-action-dependencies@v1
@@ -62,7 +63,7 @@ jobs:
           export OCI_TAG=$(echo $GITHUB_REF | sed -e "s|refs/tags/||")
   
           echo Pushing policy to OCI container registry - $OCI_TAG
-          IMMUTABLE_REF=$(kwctl push -o json annotated-wasm ghcr.io/kubewarden/policies/verify-image-signatures:${OCI_TAG} | jq -r .immutable_ref)
+          IMMUTABLE_REF=$(kwctl push -o json annotated-policy.wasm ghcr.io/kubewarden/policies/verify-image-signatures:${OCI_TAG} | jq -r .immutable_ref)
   
           echo Keyless signing of policy using cosign
           cosign sign ${IMMUTABLE_REF}
