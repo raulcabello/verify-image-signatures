@@ -15,6 +15,9 @@ use crate::tests::mock_sdk::verify_pub_keys_image;
 use kubewarden::host_capabilities::verification::verify_keyless_exact_match;
 #[cfg(not(test))]
 use kubewarden::host_capabilities::verification::verify_pub_keys_image;
+use kubewarden::host_capabilities::verification::{
+    verify_keyless_github_actions, verify_keyless_prefix_match,
+};
 use kubewarden::{logging, protocol_version_guest, request::ValidationRequest, validate_settings};
 
 mod settings;
@@ -204,6 +207,61 @@ where
                         match verify_keyless_exact_match(
                             container_image.as_str(),
                             s.keyless.clone(),
+                            s.annotations.clone(),
+                        ) {
+                            Ok(response) => {
+                                if !container_image.contains(response.digest.as_str()) {
+                                    let image_with_digest =
+                                        [container_image.as_str(), response.digest.as_str()]
+                                            .join("@");
+                                    container_with_images_digests[i]
+                                        .set_image(Some(image_with_digest));
+                                    is_modified_with_digest = true;
+                                }
+                            }
+                            Err(e) => {
+                                policy_verification_errors.push(format!(
+                                    "verification of image {} failed: {}",
+                                    container_image, e
+                                ));
+                            }
+                        }
+                    }
+                }
+                Signature::KeylessPrefix(s) => {
+                    // verify if the name matches the image name provided
+                    if WildMatch::new(s.image.as_str()).matches(container_image.as_str()) {
+                        match verify_keyless_prefix_match(
+                            container_image.as_str(),
+                            s.keyless_prefix.clone(),
+                            s.annotations.clone(),
+                        ) {
+                            Ok(response) => {
+                                if !container_image.contains(response.digest.as_str()) {
+                                    let image_with_digest =
+                                        [container_image.as_str(), response.digest.as_str()]
+                                            .join("@");
+                                    container_with_images_digests[i]
+                                        .set_image(Some(image_with_digest));
+                                    is_modified_with_digest = true;
+                                }
+                            }
+                            Err(e) => {
+                                policy_verification_errors.push(format!(
+                                    "verification of image {} failed: {}",
+                                    container_image, e
+                                ));
+                            }
+                        }
+                    }
+                }
+                Signature::GithubActions(s) => {
+                    // verify if the name matches the image name provided
+                    if WildMatch::new(s.image.as_str()).matches(container_image.as_str()) {
+                        match verify_keyless_github_actions(
+                            container_image.as_str(),
+                            s.owner.clone(),
+                            s.repo.clone(),
                             s.annotations.clone(),
                         ) {
                             Ok(response) => {
