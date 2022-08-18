@@ -72,40 +72,56 @@ impl ImageHolder for EphemeralContainer {
 fn validate(payload: &[u8]) -> CallResult {
     let validation_request: ValidationRequest<Settings> = ValidationRequest::new(payload)?;
 
-    match serde_json::from_value::<apicore::Pod>(validation_request.request.object.clone()) {
-        Ok(mut pod) => {
-            if let Some(spec) = pod.spec {
-                match verify_all_images_in_pod(&spec, &validation_request.settings.signatures) {
-                    Ok(spec_with_digest) => {
-                        if validation_request.settings.modify_images_with_digest
-                            && spec_with_digest.is_some()
-                        {
-                            pod.spec = spec_with_digest;
-                            let mutated_object = serde_json::to_value(&pod)?;
-                            return kubewarden::mutate_request(mutated_object);
-                        } else {
-                            return kubewarden::accept_request();
-                        }
-                    }
-                    Err(error) => {
-                        return kubewarden::reject_request(
-                            Some(format!(
-                                "Pod {} is not accepted: {}",
-                                &pod.metadata.name.unwrap_or_default(),
-                                error
-                            )),
-                            None,
-                            None,
-                            None,
-                        );
-                    }
-                }
-            }
+    match validation_request.request.kind.kind.as_str() {
+        "Deployment" => {
+            warn!(LOG_DRAIN, "cannot unmarshal resource: this policy does not know how to evaluate this resource; accept it");
             kubewarden::accept_request()
         }
-        Err(_) => {
-            // We were forwarded a request we cannot unmarshal or
-            // understand, just accept it
+        "Pod" => {
+            match serde_json::from_value::<apicore::Pod>(validation_request.request.object.clone())
+            {
+                Ok(mut pod) => {
+                    if let Some(spec) = pod.spec {
+                        match verify_all_images_in_pod(
+                            &spec,
+                            &validation_request.settings.signatures,
+                        ) {
+                            Ok(spec_with_digest) => {
+                                if validation_request.settings.modify_images_with_digest
+                                    && spec_with_digest.is_some()
+                                {
+                                    pod.spec = spec_with_digest;
+                                    let mutated_object = serde_json::to_value(&pod)?;
+                                    return kubewarden::mutate_request(mutated_object);
+                                } else {
+                                    return kubewarden::accept_request();
+                                }
+                            }
+                            Err(error) => {
+                                return kubewarden::reject_request(
+                                    Some(format!(
+                                        "Pod {} is not accepted: {}",
+                                        &pod.metadata.name.unwrap_or_default(),
+                                        error
+                                    )),
+                                    None,
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                    kubewarden::accept_request()
+                }
+                Err(_) => {
+                    // We were forwarded a request we cannot unmarshal or
+                    // understand, just accept it
+                    warn!(LOG_DRAIN, "cannot unmarshal resource: this policy does not know how to evaluate this resource; accept it");
+                    kubewarden::accept_request()
+                }
+            }
+        }
+        _ => {
             warn!(LOG_DRAIN, "cannot unmarshal resource: this policy does not know how to evaluate this resource; accept it");
             kubewarden::accept_request()
         }
