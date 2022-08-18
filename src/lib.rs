@@ -3,6 +3,7 @@ use lazy_static::lazy_static;
 use guest::prelude::*;
 use kubewarden_policy_sdk::wapc_guest as guest;
 
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1 as apicore;
 use k8s_openapi::api::core::v1::{Container, EphemeralContainer, PodSpec};
 
@@ -20,6 +21,7 @@ use kubewarden::host_capabilities::verification::{
     verify_pub_keys_image,
 };
 use kubewarden::{logging, protocol_version_guest, request::ValidationRequest, validate_settings};
+use serde::de::DeserializeOwned;
 
 mod settings;
 use settings::Settings;
@@ -69,29 +71,92 @@ impl ImageHolder for EphemeralContainer {
     }
 }
 
+trait ValidatingResource {
+    fn name(&self) -> String;
+    fn spec(&self) -> Option<PodSpec>;
+}
+
+impl ValidatingResource for Deployment {
+    fn name(&self) -> String {
+        self.metadata.name.clone().unwrap_or_else(|| "".to_string())
+    }
+
+    fn spec(&self) -> Option<PodSpec> {
+        self.spec.as_ref().unwrap().template.spec.clone() //TODO remove unwrap
+    }
+}
+
 fn validate(payload: &[u8]) -> CallResult {
     let validation_request: ValidationRequest<Settings> = ValidationRequest::new(payload)?;
 
-    match serde_json::from_value::<apicore::Pod>(validation_request.request.object.clone()) {
-        Ok(mut pod) => {
-            if let Some(spec) = pod.spec {
-                match verify_all_images_in_pod(&spec, &validation_request.settings.signatures) {
-                    Ok(spec_with_digest) => {
-                        if validation_request.settings.modify_images_with_digest
-                            && spec_with_digest.is_some()
-                        {
-                            pod.spec = spec_with_digest;
-                            let mutated_object = serde_json::to_value(&pod)?;
-                            return kubewarden::mutate_request(mutated_object);
-                        } else {
-                            return kubewarden::accept_request();
+    match validation_request.request.kind.kind.as_str() {
+        "Deployment" => validate_resource::<Deployment>(validation_request),
+        "Pod" => {
+            match serde_json::from_value::<apicore::Pod>(validation_request.request.object.clone())
+            {
+                Ok(mut pod) => {
+                    if let Some(spec) = pod.spec {
+                        match verify_all_images_in_pod(
+                            &spec,
+                            &validation_request.settings.signatures,
+                        ) {
+                            Ok(spec_with_digest) => {
+                                if validation_request.settings.modify_images_with_digest
+                                    && spec_with_digest.is_some()
+                                {
+                                    pod.spec = spec_with_digest;
+                                    let mutated_object = serde_json::to_value(&pod)?;
+                                    return kubewarden::mutate_request(mutated_object);
+                                } else {
+                                    return kubewarden::accept_request();
+                                }
+                            }
+                            Err(error) => {
+                                return kubewarden::reject_request(
+                                    Some(format!(
+                                        "Pod {} is not accepted: {}",
+                                        &pod.metadata.name.unwrap_or_default(),
+                                        error
+                                    )),
+                                    None,
+                                    None,
+                                    None,
+                                );
+                            }
                         }
+                    }
+                    kubewarden::accept_request()
+                }
+                Err(_) => {
+                    // We were forwarded a request we cannot unmarshal or
+                    // understand, just accept it
+                    warn!(LOG_DRAIN, "cannot unmarshal resource: this policy does not know how to evaluate this resource; accept it");
+                    kubewarden::accept_request()
+                }
+            }
+        }
+        _ => {
+            warn!(LOG_DRAIN, "cannot unmarshal resource: this policy does not know how to evaluate this resource; accept it");
+            kubewarden::accept_request()
+        }
+    }
+}
+
+fn validate_resource<T: ValidatingResource + DeserializeOwned>(
+    validation_request: ValidationRequest<Settings>,
+) -> CallResult {
+    match serde_json::from_value::<T>(validation_request.request.object.clone()) {
+        Ok(resource) => {
+            if let Some(spec) = resource.spec() {
+                match verify_all_images_in_pod(&spec, &validation_request.settings.signatures) {
+                    Ok(_) => {
+                        return kubewarden::accept_request();
                     }
                     Err(error) => {
                         return kubewarden::reject_request(
                             Some(format!(
-                                "Pod {} is not accepted: {}",
-                                &pod.metadata.name.unwrap_or_default(),
+                                "Resource {} is not accepted: {}", // TODO Reouserce should be deployment or ...
+                                &resource.name(),
                                 error
                             )),
                             None,
@@ -836,6 +901,73 @@ mod tests {
 
         let response = tc.eval(validate).unwrap();
         assert_eq!(response.accepted, true);
+        assert!(response.mutated_object.is_none())
+    }
+
+    #[test]
+    #[serial]
+    fn deployment_validation_pass() {
+        let ctx = mock_sdk::verify_keyless_exact_match_context();
+        ctx.expect().times(1).returning(|_, _, _| {
+            Ok(VerificationResponse {
+                is_trusted: true,
+                digest: "".to_string(),
+            })
+        });
+
+        let settings: Settings = Settings {
+            signatures: vec![Signature::Keyless(Keyless {
+                image: "*".to_string(),
+                keyless: vec![KeylessInfo {
+                    issuer: "issuer".to_string(),
+                    subject: "subject".to_string(),
+                }],
+                annotations: None,
+            })],
+            modify_images_with_digest: true,
+        };
+
+        let tc = Testcase {
+            name: String::from("It should successfully validate the nginx container"),
+            fixture_file: String::from("test_data/deployment_creation_signed.json"),
+            settings,
+            expected_validation_result: true,
+        };
+
+        let response = tc.eval(validate).unwrap();
+        assert_eq!(response.accepted, true);
+        assert!(response.mutated_object.is_none())
+    }
+
+    #[test]
+    #[serial]
+    fn deployment_validation_reject() {
+        let ctx = mock_sdk::verify_keyless_exact_match_context();
+        ctx.expect()
+            .times(1)
+            .returning(|_, _, _| Err(anyhow!("error")));
+
+        let settings: Settings = Settings {
+            signatures: vec![Signature::Keyless(Keyless {
+                image: "*".to_string(),
+                keyless: vec![KeylessInfo {
+                    issuer: "issuer".to_string(),
+                    subject: "subject".to_string(),
+                }],
+                annotations: None,
+            })],
+            modify_images_with_digest: true,
+        };
+
+        let tc = Testcase {
+            name: String::from("It should failed validation"),
+            fixture_file: String::from("test_data/deployment_creation_signed.json"),
+            settings,
+            expected_validation_result: false,
+        };
+
+        let response = tc.eval(validate).unwrap();
+        assert_eq!(response.accepted, false);
         assert!(response.mutated_object.is_none())
     }
 }
